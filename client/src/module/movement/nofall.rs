@@ -1,10 +1,17 @@
+use crate::mapping::raw;
+use crate::module::player::godmode;
 use crate::module::{KeyboardKey, Module, ModuleCategory, ModuleData, ModuleId};
 use crate::net::packet::{Packet, PacketAction};
+use crate::state::mapping;
 
-/// Prevents fall damage. The work happens in [`NoFallModule::handle_packet`]:
-/// while enabled, every outbound movement packet reports the player as on the
-/// ground, so the server never accumulates the fall distance it would turn
-/// into damage. `on_tick` does nothing — this module is packet-driven.
+/// Prevents fall damage, in two layers:
+///
+/// * [`NoFallModule::handle_packet`]: every outbound movement packet reports
+///   the player as on the ground, so the server never accumulates the fall
+///   distance it would turn into damage. Works on any server.
+/// * `on_tick`, in singleplayer / LAN host only: the integrated server's own
+///   player has its fall distance reset every tick — a backstop that does not
+///   depend on the packet layer at all.
 #[derive(Debug)]
 pub struct NoFallModule {
     pub module: ModuleData,
@@ -35,7 +42,14 @@ impl Module for NoFallModule {
     }
 
     fn on_tick(&self) -> anyhow::Result<()> {
-        Ok(())
+        let Some(server_player) = godmode::server_player()? else {
+            return Ok(());
+        };
+        mapping().in_frame(|| {
+            let mut env = mapping().get_env()?;
+            raw::call(&mut env, server_player.as_obj(), "resetFallDistance", "()V", &[])?;
+            Ok(())
+        })
     }
 
     fn handle_packet(&self, packet: &mut Packet) -> PacketAction {

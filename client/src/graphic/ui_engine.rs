@@ -213,6 +213,12 @@ pub unsafe fn render_egui_ui() {
         crate::gl::PixelStorei(crate::gl::UNPACK_SKIP_PIXELS, 0);
         crate::gl::PixelStorei(crate::gl::UNPACK_SKIP_ROWS, 0);
 
+        // Older Minecraft (≤ 1.21.x) caches GL capabilities in GlStateManager
+        // and skips glEnable when it believes a flag is already on — so a
+        // DEPTH_TEST / CULL_FACE left disabled here is never turned back on,
+        // and the world renders without depth (caves showing through terrain).
+        let fixed_state = FixedState::capture();
+
         crate::gl::Disable(crate::gl::CULL_FACE);
         crate::gl::Disable(crate::gl::DEPTH_TEST);
         crate::gl::Enable(crate::gl::BLEND);
@@ -223,6 +229,8 @@ pub unsafe fn render_egui_ui() {
             &clipped_primitives,
             &full_output.textures_delta,
         );
+
+        fixed_state.restore();
 
         // Restore critical state to prevent Minecraft rendering corruption
         // (and prevent Minecraft from corrupting our EGUI texture/vao on the next frame)
@@ -236,6 +244,95 @@ pub unsafe fn render_egui_ui() {
         crate::gl::UseProgram(last_program as u32);
         crate::gl::BindSampler(0, last_sampler as u32);
         crate::gl::ActiveTexture(last_active_texture as u32);
+    }
+}
+
+/// The fixed-function GL state egui's painter changes — capabilities, blend
+/// setup, colour mask, viewport and scissor box — captured before painting
+/// and put back afterwards, so the host renderer finds the state it left.
+struct FixedState {
+    caps: [(u32, bool); 5],
+    blend_src_rgb: i32,
+    blend_dst_rgb: i32,
+    blend_src_alpha: i32,
+    blend_dst_alpha: i32,
+    blend_eq_rgb: i32,
+    blend_eq_alpha: i32,
+    color_mask: [u8; 4],
+    viewport: [i32; 4],
+    scissor_box: [i32; 4],
+}
+
+impl FixedState {
+    const CAPS: [u32; 5] = [
+        crate::gl::DEPTH_TEST,
+        crate::gl::CULL_FACE,
+        crate::gl::BLEND,
+        crate::gl::SCISSOR_TEST,
+        crate::gl::FRAMEBUFFER_SRGB,
+    ];
+
+    unsafe fn capture() -> Self {
+        let int = |name| {
+            let mut value = 0;
+            crate::gl::GetIntegerv(name, &mut value);
+            value
+        };
+        let mut color_mask = [0u8; 4];
+        crate::gl::GetBooleanv(crate::gl::COLOR_WRITEMASK, color_mask.as_mut_ptr());
+        let mut viewport = [0; 4];
+        crate::gl::GetIntegerv(crate::gl::VIEWPORT, viewport.as_mut_ptr());
+        let mut scissor_box = [0; 4];
+        crate::gl::GetIntegerv(crate::gl::SCISSOR_BOX, scissor_box.as_mut_ptr());
+
+        FixedState {
+            caps: Self::CAPS.map(|cap| (cap, crate::gl::IsEnabled(cap) == crate::gl::TRUE)),
+            blend_src_rgb: int(crate::gl::BLEND_SRC_RGB),
+            blend_dst_rgb: int(crate::gl::BLEND_DST_RGB),
+            blend_src_alpha: int(crate::gl::BLEND_SRC_ALPHA),
+            blend_dst_alpha: int(crate::gl::BLEND_DST_ALPHA),
+            blend_eq_rgb: int(crate::gl::BLEND_EQUATION_RGB),
+            blend_eq_alpha: int(crate::gl::BLEND_EQUATION_ALPHA),
+            color_mask,
+            viewport,
+            scissor_box,
+        }
+    }
+
+    unsafe fn restore(&self) {
+        for (cap, enabled) in self.caps {
+            if enabled {
+                crate::gl::Enable(cap);
+            } else {
+                crate::gl::Disable(cap);
+            }
+        }
+        crate::gl::BlendFuncSeparate(
+            self.blend_src_rgb as u32,
+            self.blend_dst_rgb as u32,
+            self.blend_src_alpha as u32,
+            self.blend_dst_alpha as u32,
+        );
+        crate::gl::BlendEquationSeparate(self.blend_eq_rgb as u32, self.blend_eq_alpha as u32);
+        let [r, g, b, a] = self.color_mask;
+        crate::gl::ColorMask(r, g, b, a);
+        let [x, y, w, h] = self.viewport;
+        crate::gl::Viewport(x, y, w, h);
+        let [x, y, w, h] = self.scissor_box;
+        crate::gl::Scissor(x, y, w, h);
+    }
+}
+
+/// Set once a Panic has been requested, so a held or repeated key cannot
+/// start a second unload.
+static PANIC_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Runs [`call_panic`] once, on its own thread — it removes the very hooks
+/// (input callback, frame hook) a request may come from.
+pub fn request_panic() {
+    if !PANIC_REQUESTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        log::info!("Panic requested — unloading");
+        std::thread::spawn(call_panic);
     }
 }
 

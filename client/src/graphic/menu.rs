@@ -44,16 +44,22 @@ pub fn draw(ctx: &Context, progress: f32) {
     let registry = crate::state::client().modules.by_id();
 
     // Single lock per module: collect the data layout needs, nothing more.
-    let mut entries: Vec<(ModuleId, ModuleCategory)> = registry
+    // Single lock per module: what layout and search need, nothing more.
+    let query = SEARCH.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    let mut entries: Vec<(ModuleId, ModuleCategory, bool)> = registry
         .iter()
         .map(|(id, arc)| {
             let module = arc.lock().unwrap();
-            (*id, module.get_module_data().category)
+            let data = module.get_module_data();
+            (*id, data.category, matches(&query, id.display_name(), &data.description))
         })
         .collect();
-    entries.sort_by_key(|(id, _)| id.display_name());
+    entries.sort_by_key(|(id, _, _)| id.display_name());
+    // Whether a row was waiting for a keybind last frame — typing then must
+    // not start a search.
+    let was_listening = KEYBIND_LISTENING.swap(false, Ordering::Relaxed);
 
-    draw_toolbar(ctx, progress);
+    draw_toolbar(ctx, progress, was_listening);
 
     // Auto-layout: place non-empty categories left-to-right, wrapping rows.
     let categories = [
@@ -63,32 +69,59 @@ pub fn draw(ctx: &Context, progress: f32) {
         ModuleCategory::Player,
         ModuleCategory::World,
         ModuleCategory::Misc,
+        ModuleCategory::Optimization,
     ];
     let screen_w = ctx.screen_rect().width();
     let mut slot = Pos2::new(ORIGIN_X, ORIGIN_Y);
 
     for category in categories {
+        if !entries.iter().any(|(_, cat, _)| *cat == category) {
+            continue;
+        }
+        // The auto-layout slot advances for every category, matched or not,
+        // so panels do not jump around while a search narrows the list.
+        if slot.x + PANEL_W > screen_w - 20.0 && slot.x > ORIGIN_X {
+            slot.x = ORIGIN_X;
+            slot.y += ROW_STRIDE;
+        }
+        let here = slot;
+        slot.x += PANEL_W + GAP;
+
         let members: Vec<(String, &ModuleArc)> = entries
             .iter()
-            .filter(|(_, cat)| *cat == category)
-            .filter_map(|(id, _)| {
+            .filter(|(_, cat, found)| *cat == category && *found)
+            .filter_map(|(id, _, _)| {
                 registry
                     .get(id)
                     .map(|arc| (id.display_name().to_string(), arc))
             })
             .collect();
         if members.is_empty() {
-            continue;
+            continue; // nothing in this category matches the search
         }
-
-        if slot.x + PANEL_W > screen_w - 20.0 && slot.x > ORIGIN_X {
-            slot.x = ORIGIN_X;
-            slot.y += ROW_STRIDE;
-        }
-
-        draw_panel(ctx, progress, category, &members, slot, &registry);
-        slot.x += PANEL_W + GAP;
+        draw_panel(ctx, progress, category, &members, here, &registry);
     }
+}
+
+/// The ClickGUI search query.
+static SEARCH: Mutex<String> = Mutex::new(String::new());
+/// Set by a module row while it waits for a key to bind.
+static KEYBIND_LISTENING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Empties the search — the menu opens unfiltered.
+pub fn clear_search() {
+    SEARCH.lock().unwrap_or_else(|p| p.into_inner()).clear();
+}
+
+/// Pure: whether a module matches the search `query` — every word of it
+/// found in the name or the description, ignoring case. An empty query
+/// matches everything.
+pub fn matches(query: &str, name: &str, description: &str) -> bool {
+    let haystack = format!("{name} {description}").to_lowercase();
+    query
+        .to_lowercase()
+        .split_whitespace()
+        .all(|word| haystack.contains(word))
 }
 
 /// Dims the game behind the menu, fading with the open animation.
@@ -103,7 +136,7 @@ fn draw_backdrop(ctx: &Context, progress: f32) {
 }
 
 /// Top-center bar: the brand title plus the Panic / Reset actions.
-fn draw_toolbar(ctx: &Context, progress: f32) {
+fn draw_toolbar(ctx: &Context, progress: f32, keybind_listening: bool) {
     let slide = 16.0 * (1.0 - progress);
     egui::Area::new(Id::new("clickgui_toolbar"))
         .order(Order::Foreground)
@@ -128,11 +161,34 @@ fn draw_toolbar(ctx: &Context, progress: f32) {
                         );
                         ui.add_space(16.0);
 
+                        search_box(ui, keybind_listening);
+                        ui.add_space(10.0);
+
                         let panic =
                             Button::new(RichText::new("Panic").size(12.5).color(theme::DANGER))
                                 .fill(theme::ELEVATED);
-                        if ui.add(panic).clicked() {
-                            std::thread::spawn(crate::graphic::ui_engine::call_panic);
+                        if ui
+                            .add(panic)
+                            .on_hover_text("Unloads the client — also Ctrl+End, any time")
+                            .clicked()
+                        {
+                            crate::graphic::ui_engine::request_panic();
+                        }
+
+                        ui.add_space(6.0);
+                        let hidden = crate::graphic::gui::hud_hidden();
+                        let hide_hud = Button::new(
+                            RichText::new(if hidden { "Show HUD" } else { "Hide HUD" })
+                                .size(12.5)
+                                .color(if hidden { theme::ACCENT } else { theme::TEXT_DIM }),
+                        )
+                        .fill(theme::ELEVATED);
+                        if ui
+                            .add(hide_hud)
+                            .on_hover_text("Hides everything the client draws outside this menu: watermark, module list, ESP, notifications")
+                            .clicked()
+                        {
+                            crate::graphic::gui::toggle_hud_hidden();
                         }
 
                         ui.add_space(6.0);
@@ -166,6 +222,35 @@ fn draw_toolbar(ctx: &Context, progress: f32) {
         });
 }
 
+/// The module search field. Ctrl+F focuses it; typing while nothing else
+/// has focus (and no row waits for a keybind) goes straight into it.
+fn search_box(ui: &mut Ui, keybind_listening: bool) {
+    let id = Id::new("clickgui_search");
+    let ctx = ui.ctx().clone();
+    let ctrl_f = ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F));
+    let typing = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Text(t) if !t.trim().is_empty())));
+    let free = ctx.memory(|m| m.focused().is_none());
+    if ctrl_f || (typing && free && !keybind_listening) {
+        ctx.memory_mut(|m| m.request_focus(id));
+    }
+
+    let mut guard = SEARCH.lock().unwrap_or_else(|p| p.into_inner());
+    let active = !guard.is_empty();
+    ui.add(
+        egui::TextEdit::singleline(&mut *guard)
+            .id(id)
+            .hint_text("Search modules (Ctrl+F)")
+            .desired_width(170.0)
+            .text_color(theme::TEXT),
+    );
+    if active {
+        let clear = Button::new(RichText::new("×").size(13.0).color(theme::TEXT_DIM)).fill(theme::ELEVATED);
+        if ui.add(clear).on_hover_text("Clear the search").clicked() {
+            guard.clear();
+        }
+    }
+}
+
 /// Draws one category panel: spring-positioned, draggable, with its rows.
 fn draw_panel(
     ctx: &Context,
@@ -176,6 +261,17 @@ fn draw_panel(
     registry: &ModuleMap,
 ) {
     let name = category.display_name();
+
+    // Only the current workspace's panels are shown (cross-fading on a switch).
+    let fade = crate::graphic::workspace::opacity(ctx, &crate::graphic::workspace::panel_key(category));
+    if fade <= 0.0 {
+        return;
+    }
+    let progress = progress * fade;
+    crate::graphic::workspace::drawn_panel(
+        LayerId::new(Order::Foreground, Id::new("clickgui_panel").with(name)),
+        category,
+    );
 
     // The panel's drag target lives in the config (persisted); the spring
     // smooths the rendered position toward it, frame-rate independently. A
@@ -431,7 +527,7 @@ fn draw_settings(ui: &mut Ui, data: &mut ModuleData, arc: &ModuleArc, registry: 
                         min,
                         max,
                     } => {
-                        labelled_value(ui, name, &format!("{value:.2}"));
+                        labelled_value(ui, name, &slider_text(name, *value, *min, *max));
                         ui.spacing_mut().slider_width = ui.available_width();
                         ui.add(egui::Slider::new(value, *min..=*max).show_value(false));
                     }
@@ -493,6 +589,9 @@ fn keybind_row(ui: &mut Ui, data: &mut ModuleData, arc: &ModuleArc, registry: &M
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let bind_id = Id::new("kb_listen").with(data.name());
             let listening = ui.data(|d| d.get_temp::<bool>(bind_id).unwrap_or(false));
+            if listening {
+                KEYBIND_LISTENING.store(true, Ordering::Relaxed);
+            }
 
             let caption = if listening {
                 if capture_keybind(data, arc, registry) {
@@ -566,6 +665,29 @@ fn label(text: &str) -> RichText {
 }
 
 /// Draws a `name … value` row, value accented and right-aligned.
+/// A slider's value as shown. Names can label special values —
+/// `Render distance (0 = keep)`, `Max FPS (0 = keep, 260 = unlimited)` —
+/// shown as their word; such sliders, and `%` / `(s)` ones, read as whole
+/// numbers.
+fn slider_text(name: &str, value: f32, _min: f32, _max: f32) -> String {
+    let labels = name
+        .rsplit_once('(')
+        .and_then(|(_, rest)| rest.strip_suffix(')'))
+        .filter(|inner| inner.contains('='))
+        .unwrap_or("");
+    for label in labels.split(',') {
+        if let Some((number, word)) = label.split_once('=') {
+            if number.trim().parse::<f32>().is_ok_and(|n| n == value.round()) {
+                return word.trim().to_string();
+            }
+        }
+    }
+    if !labels.is_empty() || name.contains('%') || name.contains("(s)") || name.contains("(blocks)") {
+        return format!("{}", value.round());
+    }
+    format!("{value:.2}")
+}
+
 fn labelled_value(ui: &mut Ui, name: &str, value: &str) {
     ui.horizontal(|ui| {
         ui.label(label(name));
@@ -573,4 +695,17 @@ fn labelled_value(ui: &mut Ui, name: &str, value: &str) {
             ui.label(RichText::new(value).size(12.0).color(theme::ACCENT));
         });
     });
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::matches;
+
+    #[test]
+    fn every_word_must_match_the_name_or_description() {
+        assert!(matches("", "KillAura", "Attacks players"));
+        assert!(matches("kill", "KillAura", ""));
+        assert!(matches("place air", "AirPlace", "Places blocks in mid-air"));
+        assert!(!matches("fly", "KillAura", "Attacks players"));
+    }
 }

@@ -10,6 +10,21 @@ use log::error;
 use crate::module::{KeyboardKey, Module, ModuleId, ModuleSetting, ModuleType};
 use crate::net::packet::{Packet, PacketAction};
 
+/// One-shot modules that asked to switch themselves off — applied at the
+/// start of the next [`ModuleRegistry::tick`], outside the module's own lock.
+static DISABLE_REQUESTS: Mutex<Vec<ModuleId>> = Mutex::new(Vec::new());
+
+/// Asks for module `id` to be switched off on the next tick. Lets a module
+/// that is an action rather than a state (e.g. a teleport) turn itself off
+/// after running — it cannot from inside its own `on_start`, which runs while
+/// its lock is held.
+pub fn request_disable(id: ModuleId) {
+    DISABLE_REQUESTS
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .push(id);
+}
+
 /// A shared, lockable handle to one module.
 pub type ModuleHandle = Arc<Mutex<ModuleType>>;
 
@@ -136,6 +151,7 @@ impl ModuleRegistry {
     /// Ticks every enabled module once. A module whose tick fails is stopped
     /// rather than aborting the whole pass.
     pub fn tick(&self) {
+        self.apply_disable_requests();
         for handle in self.handles() {
             let Ok(module) = handle.lock() else {
                 continue;
@@ -150,6 +166,36 @@ impl ModuleRegistry {
                     error!("module '{name}' also failed to stop: {e}");
                 }
             }
+        }
+    }
+
+    /// Switches off every module that called [`request_disable`].
+    fn apply_disable_requests(&self) {
+        let requests = std::mem::take(
+            &mut *DISABLE_REQUESTS
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()),
+        );
+        let mut changed = false;
+        for id in requests {
+            let Some(handle) = self.get(id) else {
+                continue;
+            };
+            let Ok(mut module) = handle.lock() else {
+                continue;
+            };
+            if !module.get_module_data().enabled {
+                continue;
+            }
+            module.get_module_data_mut().set_enabled(false);
+            if let Err(e) = module.on_stop() {
+                error!("module '{}' failed to stop: {e}", module.get_module_data().name());
+            }
+            changed = true;
+        }
+        // Every module lock is released by now — `save` locks them all.
+        if changed {
+            crate::config::save();
         }
     }
 

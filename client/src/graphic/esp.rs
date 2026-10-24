@@ -1,4 +1,5 @@
-//! ESP overlay: 3D wireframe boxes for players, mobs and containers.
+//! ESP overlay: 3D wireframe boxes for players, mobs, containers and chosen
+//! blocks (the Block ESP scan itself runs in [`block_esp`]).
 //!
 //! # Performance model
 //!
@@ -24,6 +25,10 @@ use crate::mapping::entity::player::Player;
 use crate::mapping::entity::{Entity, EntityRef, LivingEntityRef};
 use crate::mapping::math::Vec3;
 use crate::mapping::MappedObject;
+use crate::module::misc::friends;
+use crate::module::render::block_esp::{self, FoundBlock};
+use crate::module::render::trajectories::{self, Path};
+use crate::graphic::frame_matrices;
 use crate::module::{ModuleId, ModuleSetting};
 use crate::state::{client, minecraft};
 use egui::{
@@ -110,6 +115,10 @@ struct View {
     tan_y: f64,
     w: f32,
     h: f32,
+    /// The game's own `projection × model-view` for this frame, when
+    /// captured — see [`frame_matrices`]. Preferred: it includes zoom mods,
+    /// camera roll and view bobbing, which the angles above know nothing of.
+    matrix: Option<[f64; 16]>,
 }
 
 impl View {
@@ -117,6 +126,12 @@ impl View {
     /// lies behind the camera (where a perspective divide is meaningless).
     fn project(&self, p: V3) -> Option<Pos2> {
         let r = p.sub(self.cam);
+        if let Some(matrix) = &self.matrix {
+            let [x, y] = frame_matrices::to_ndc(matrix, [r.x, r.y, r.z])?;
+            let sx = (x * 0.5 + 0.5) * self.w as f64;
+            let sy = (0.5 - y * 0.5) * self.h as f64;
+            return Some(pos2(sx as f32, sy as f32));
+        }
         let depth = r.dot(self.fwd);
         if depth < 0.05 {
             return None;
@@ -162,6 +177,7 @@ fn build_view(cam: V3, yaw_deg: f32, pitch_deg: f32, fov_deg: f64, w: f32, h: f3
         tan_y,
         w,
         h,
+        matrix: None,
     }
 }
 
@@ -187,6 +203,8 @@ struct EntityTarget {
     name: String,
     health: f32,
     max_health: f32,
+    /// A player on the Friends list — drawn in the friend color.
+    friend: bool,
 }
 
 /// One container block, by its lower-corner block coordinates.
@@ -272,10 +290,27 @@ struct NametagCfg {
     range: f32,
 }
 
+/// Block ESP options, snapshotted from the Block ESP module once per frame.
+struct BlockCfg {
+    enabled: bool,
+    color: Color32,
+    /// How many of the nearest found blocks are drawn.
+    max_boxes: usize,
+}
+
+/// Trajectories options, snapshotted from the module once per frame.
+struct TrajectoryCfg {
+    enabled: bool,
+    color: Color32,
+    options: trajectories::Options,
+}
+
 struct EspConfig {
+    trajectory: TrajectoryCfg,
     player: EntityCfg,
     mob: EntityCfg,
     chest: ChestCfg,
+    block: BlockCfg,
     tracer: TracerCfg,
     nametag: NametagCfg,
 }
@@ -285,6 +320,8 @@ impl EspConfig {
         self.player.enabled
             || self.mob.enabled
             || self.chest.enabled
+            || self.block.enabled
+            || self.trajectory.enabled
             || self.tracer.enabled
             || self.nametag.enabled
     }
@@ -336,12 +373,28 @@ fn read_config() -> EspConfig {
         range: 0.0,
     };
     let mut cfg = EspConfig {
+        trajectory: TrajectoryCfg {
+            enabled: false,
+            color: Color32::WHITE,
+            options: trajectories::Options {
+                pearls: false,
+                throwables: false,
+                potions: false,
+                bows: false,
+                tridents: false,
+            },
+        },
         player: disabled_entity(),
         mob: disabled_entity(),
         chest: ChestCfg {
             enabled: false,
             color: Color32::WHITE,
             show_distance: false,
+        },
+        block: BlockCfg {
+            enabled: false,
+            color: Color32::WHITE,
+            max_boxes: 0,
         },
         tracer: TracerCfg {
             enabled: false,
@@ -397,6 +450,26 @@ fn read_config() -> EspConfig {
             };
         }
     }
+    if let Some(arc) = modules.get(ModuleId::Trajectories) {
+        if let Ok(module) = arc.lock() {
+            let data = module.get_module_data();
+            cfg.trajectory = TrajectoryCfg {
+                enabled: data.enabled,
+                color: color_setting(data, "Color", Color32::from_rgb(190, 90, 255)),
+                options: trajectories::Options::from_module(data),
+            };
+        }
+    }
+    if let Some(arc) = modules.get(ModuleId::BlockEsp) {
+        if let Ok(module) = arc.lock() {
+            let data = module.get_module_data();
+            cfg.block = BlockCfg {
+                enabled: data.enabled,
+                color: color_setting(data, "Color", Color32::from_rgb(76, 217, 255)),
+                max_boxes: slider_setting(data, "Max boxes", 300.0) as usize,
+            };
+        }
+    }
     if let Some(arc) = modules.get(ModuleId::Tracers) {
         if let Ok(module) = arc.lock() {
             let data = module.get_module_data();
@@ -435,7 +508,9 @@ pub fn draw(ctx: &Context) {
     let cfg = read_config();
     let mut state = state().lock().unwrap();
 
-    if !cfg.any_enabled() {
+    let air_target = crate::module::world::airplace::preview();
+    let extras = crate::module::render::item_esp::active() || crate::module::render::hit_effects::wants_world();
+    if !cfg.any_enabled() && air_target.is_none() && !extras {
         state.entities.clear();
         state.chests.clear();
         return;
@@ -465,6 +540,33 @@ pub fn draw(ctx: &Context) {
     }
     for chest in &state.chests {
         draw_chest(&painter, &view, chest, &cfg);
+    }
+    if cfg.trajectory.enabled {
+        if let Some(path) = trajectories::current(cfg.trajectory.options) {
+            draw_trajectory(&painter, &view, &path, cfg.trajectory.color);
+        }
+    }
+    if let Some(([x, y, z], [r, g, b, a])) = air_target {
+        let min = V3 { x: x as f64, y: y as f64, z: z as f64 };
+        let max = V3 { x: min.x + 1.0, y: min.y + 1.0, z: min.z + 1.0 };
+        let color = Color32::from_rgba_unmultiplied(
+            (r * 255.0) as u8,
+            (g * 255.0) as u8,
+            (b * 255.0) as u8,
+            (a * 255.0) as u8,
+        );
+        draw_wire_box(&painter, &view, &box_corners(min, max), color);
+    }
+    // ItemESP and damage numbers draw through the same projection.
+    let project = |p: [f64; 3]| view.project(V3 { x: p[0], y: p[1], z: p[2] });
+    crate::module::render::item_esp::draw(&painter, &project);
+    crate::module::render::hit_effects::draw_world(&painter, &project);
+    if cfg.block.enabled {
+        block_esp::with_found(|blocks| {
+            for block in blocks.iter().take(cfg.block.max_boxes) {
+                draw_block(&painter, &view, block, &cfg.block);
+            }
+        });
     }
 }
 
@@ -523,14 +625,17 @@ fn read_view(state: &mut EspState, ctx: &Context) -> Option<View> {
 
     let fov_deg = resolve_fov(&camera, state, ctx);
 
-    Some(build_view(
-        cam_pos,
-        yaw,
-        pitch,
-        fov_deg,
-        rect.width(),
-        rect.height(),
-    ))
+    let mut view = build_view(cam_pos, yaw, pitch, fov_deg, rect.width(), rect.height());
+    // The exact camera the level was just drawn with, when available.
+    if let Some(captured) = frame_matrices::take() {
+        view.matrix = Some(captured.matrix);
+        view.cam = V3 {
+            x: captured.cam[0],
+            y: captured.cam[1],
+            z: captured.cam[2],
+        };
+    }
+    Some(view)
 }
 
 /// Per-frame FOV resolution.
@@ -746,6 +851,7 @@ fn process_entity(
         pos,
         width,
         height,
+        friend: kind == TargetKind::Player && friends::is_friend(&name),
         name,
         health,
         max_health,
@@ -917,6 +1023,21 @@ fn draw_entity(painter: &Painter, view: &View, entity: &EntityTarget, t: f64, cf
         return;
     }
 
+    // Friends get their own color while the Friends module is on.
+    let friend_color = if entity.friend {
+        friends::esp_color().map(|c| {
+            Color32::from_rgba_unmultiplied(
+                (c[0] * 255.0) as u8,
+                (c[1] * 255.0) as u8,
+                (c[2] * 255.0) as u8,
+                (c[3] * 255.0).max(40.0) as u8,
+            )
+        })
+    } else {
+        None
+    };
+    let color = friend_color.unwrap_or(icfg.color);
+
     let feet = entity.prev.lerp(entity.pos, t);
     let half = entity.width * 0.5;
     let corners = box_corners(
@@ -932,7 +1053,7 @@ fn draw_entity(painter: &Painter, view: &View, entity: &EntityTarget, t: f64, cf
         },
     );
 
-    let rect = match draw_wire_box(painter, view, &corners, icfg.color) {
+    let rect = match draw_wire_box(painter, view, &corners, color) {
         Some(rect) => rect,
         None => return,
     };
@@ -946,7 +1067,7 @@ fn draw_entity(painter: &Painter, view: &View, entity: &EntityTarget, t: f64, cf
             pos2(rect.center().x, rect.top() - 7.0),
             Align2::CENTER_BOTTOM,
             &entity.name,
-            icfg.color,
+            color,
         );
     }
     if icfg.show_distance {
@@ -1057,6 +1178,47 @@ fn draw_chest(painter: &Painter, view: &View, chest: &ChestTarget, cfg: &EspConf
             cfg.chest.color,
         );
     }
+}
+
+fn draw_trajectory(painter: &Painter, view: &View, path: &Path, color: Color32) {
+    let stroke = Stroke::new(LINE_WIDTH, color);
+    let projected: Vec<Option<Pos2>> = path
+        .points
+        .iter()
+        .map(|p| view.project(V3 { x: p[0], y: p[1], z: p[2] }))
+        .collect();
+    let on_screen = Rect::from_min_size(Pos2::ZERO, vec2(view.w, view.h));
+    let visible = projected.iter().flatten().filter(|p| on_screen.contains(**p)).count();
+    trajectories::report("draw", format!(
+        "{} of the path on screen",
+        if visible == 0 { "none" } else { "part" },
+    ));
+    for pair in projected.windows(2) {
+        if let [Some(a), Some(b)] = pair {
+            painter.line_segment([*a, *b], stroke);
+        }
+    }
+    // A small box marks the landing point.
+    if let (true, Some(end)) = (path.hit, path.points.last()) {
+        let r = 0.25;
+        let min = V3 { x: end[0] - r, y: end[1] - r, z: end[2] - r };
+        let max = V3 { x: end[0] + r, y: end[1] + r, z: end[2] + r };
+        draw_wire_box(painter, view, &box_corners(min, max), color);
+    }
+}
+
+fn draw_block(painter: &Painter, view: &View, block: &FoundBlock, cfg: &BlockCfg) {
+    let min = V3 {
+        x: block.pos[0] as f64,
+        y: block.pos[1] as f64,
+        z: block.pos[2] as f64,
+    };
+    let max = V3 {
+        x: min.x + 1.0,
+        y: min.y + 1.0,
+        z: min.z + 1.0,
+    };
+    draw_wire_box(painter, view, &box_corners(min, max), cfg.color);
 }
 
 /// A thin health bar straddling the top edge of `rect`, red→yellow→green.

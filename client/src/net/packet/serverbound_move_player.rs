@@ -9,6 +9,7 @@ use crate::state::mapping;
 use jni::objects::{JObject, JValue};
 use jni::sys::jobject;
 use jni::JNIEnv;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Class of the abstract `ServerboundMovePlayerPacket`.
 pub const CLASS_TYPE: MinecraftClassType = MinecraftClassType::ServerboundMovePlayerPacket;
@@ -47,9 +48,14 @@ impl ServerboundMovePlayerPacket {
                 .call_method(packet, "getXRot", "(F)F", &[JValue::Float(0.0)])?
                 .f()?,
             on_ground: env.call_method(packet, "isOnGround", "()Z", &[])?.z()?,
-            horizontal_collision: env
-                .call_method(packet, "horizontalCollision", "()Z", &[])?
-                .z()?,
+            // `horizontalCollision` only exists from 1.21.2 on.
+            horizontal_collision: match env.call_method(packet, "horizontalCollision", "()Z", &[]) {
+                Ok(value) => value.z()?,
+                Err(_) => {
+                    env.exception_clear()?;
+                    false
+                }
+            },
             has_position: env.call_method(packet, "hasPosition", "()Z", &[])?.z()?,
             has_rotation: env.call_method(packet, "hasRotation", "()Z", &[])?.z()?,
         })
@@ -60,68 +66,53 @@ impl ServerboundMovePlayerPacket {
     pub fn to_java(self, env: &mut JNIEnv) -> anyhow::Result<jobject> {
         let on_ground = JValue::Bool(self.on_ground as u8);
         let collision = JValue::Bool(self.horizontal_collision as u8);
+        let (x, y, z) = (JValue::Double(self.x), JValue::Double(self.y), JValue::Double(self.z));
+        let (y_rot, x_rot) = (JValue::Float(self.y_rot), JValue::Float(self.x_rot));
 
-        let object = match (self.has_position, self.has_rotation) {
-            (true, true) => {
-                let class = mapping().resolve_class(
-                    env,
-                    MinecraftClassType::ServerboundMovePlayerPacketPosRot.get_name(),
-                )?;
-                env.new_object(
-                    &class,
+        // Each constructor takes a trailing `horizontalCollision` flag from
+        // 1.21.2 on; older versions end at `onGround`.
+        let (class_type, modern_sig, args): (_, _, Vec<JValue>) =
+            match (self.has_position, self.has_rotation) {
+                (true, true) => (
+                    MinecraftClassType::ServerboundMovePlayerPacketPosRot,
                     "(DDDFFZZ)V",
-                    &[
-                        JValue::Double(self.x),
-                        JValue::Double(self.y),
-                        JValue::Double(self.z),
-                        JValue::Float(self.y_rot),
-                        JValue::Float(self.x_rot),
-                        on_ground,
-                        collision,
-                    ],
-                )?
-            }
-            (true, false) => {
-                let class = mapping().resolve_class(
-                    env,
-                    MinecraftClassType::ServerboundMovePlayerPacketPos.get_name(),
-                )?;
-                env.new_object(
-                    &class,
+                    vec![x, y, z, y_rot, x_rot, on_ground],
+                ),
+                (true, false) => (
+                    MinecraftClassType::ServerboundMovePlayerPacketPos,
                     "(DDDZZ)V",
-                    &[
-                        JValue::Double(self.x),
-                        JValue::Double(self.y),
-                        JValue::Double(self.z),
-                        on_ground,
-                        collision,
-                    ],
-                )?
-            }
-            (false, true) => {
-                let class = mapping().resolve_class(
-                    env,
-                    MinecraftClassType::ServerboundMovePlayerPacketRot.get_name(),
-                )?;
-                env.new_object(
-                    &class,
+                    vec![x, y, z, on_ground],
+                ),
+                (false, true) => (
+                    MinecraftClassType::ServerboundMovePlayerPacketRot,
                     "(FFZZ)V",
-                    &[
-                        JValue::Float(self.y_rot),
-                        JValue::Float(self.x_rot),
-                        on_ground,
-                        collision,
-                    ],
-                )?
+                    vec![y_rot, x_rot, on_ground],
+                ),
+                (false, false) => (
+                    MinecraftClassType::ServerboundMovePlayerPacketStatusOnly,
+                    "(ZZ)V",
+                    vec![on_ground],
+                ),
+            };
+        let class = mapping().resolve_class(env, class_type.get_name())?;
+
+        if !LEGACY_CONSTRUCTORS.load(Ordering::Relaxed) {
+            let mut modern_args = args.clone();
+            modern_args.push(collision);
+            match env.new_object(&class, modern_sig, &modern_args) {
+                Ok(object) => return Ok(object.into_raw()),
+                Err(_) => {
+                    env.exception_clear()?;
+                    LEGACY_CONSTRUCTORS.store(true, Ordering::Relaxed);
+                }
             }
-            (false, false) => {
-                let class = mapping().resolve_class(
-                    env,
-                    MinecraftClassType::ServerboundMovePlayerPacketStatusOnly.get_name(),
-                )?;
-                env.new_object(&class, "(ZZ)V", &[on_ground, collision])?
-            }
-        };
-        Ok(object.into_raw())
+        }
+        // `(…Z)V` — the modern descriptor minus its last `Z`.
+        let legacy_sig = modern_sig.replacen("Z)V", ")V", 1);
+        Ok(env.new_object(&class, &legacy_sig, &args)?.into_raw())
     }
 }
+
+/// Set once the 1.21.2+ constructors turn out to be missing, so later packets
+/// go straight to the pre-1.21.2 ones.
+static LEGACY_CONSTRUCTORS: AtomicBool = AtomicBool::new(false);

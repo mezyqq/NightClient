@@ -45,7 +45,7 @@ This is the core control flow and spans `injector`, `protocol`, `agent_loader`, 
 4. `agent_loader`'s `library` module copies the library to a uniquely named temp file (avoids file locks), `dlopen`s it, and calls the exported `initialize_client`.
 5. Re-injecting repeats step 3 → `library::reload` cleans up and drops the old library (calling `cleanup_client`) before loading the new one. This is the hot-reload path.
 
-`client` exposes exactly two `#[no_mangle] extern "C"` symbols: `initialize_client` and `cleanup_client`. `initialize_client` spawns a thread that calls `state::init()`, then `register_modules()`, then installs hooks — in that fixed order.
+`client` exposes four `#[no_mangle] extern "C"` symbols: `initialize_client` and `cleanup_client` (the lifecycle above), plus `save_config` and `load_config` (`-> bool`), which the agent loader calls on the `save-config` / `load-config` protocol commands — the agent answers those with an `ok` / `err …` line. They back the config-profile manager of the external `darkC` terminal launcher: `load_config` hands the request to the render thread (`config::process_pending`, polled from `on_frame`), which re-reads the config file and applies it live, starting/stopping modules whose enabled flag changed. `initialize_client` spawns a thread that calls `state::init()`, then `register_modules()`, then installs hooks — in that fixed order.
 
 ## client/ Internals
 

@@ -1,6 +1,6 @@
 //! Command parsing and dispatch for a single client connection.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
@@ -41,6 +41,21 @@ pub fn handle_connection(stream: TcpStream) {
             if let Err(e) = library::reload(&library) {
                 error!("reload failed: {e}");
             }
+        }
+        Ok(command @ (Command::SaveConfig | Command::LoadConfig)) => {
+            let symbol: &[u8] = match command {
+                Command::SaveConfig => b"save_config",
+                _ => b"load_config",
+            };
+            info!("{command:?} received");
+            let reply = match library::call_status(symbol) {
+                Ok(()) => "ok".to_string(),
+                Err(e) => {
+                    error!("{command:?} failed: {e}");
+                    format!("err {e}")
+                }
+            };
+            let _ = writeln!(reader.get_mut(), "{reply}");
         }
         Err(e) => error!("ignoring invalid command {:?}: {e}", line.trim()),
     }

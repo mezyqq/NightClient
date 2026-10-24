@@ -29,9 +29,15 @@ impl MultiPlayerGameMode {
         Ok(())
     }
 
-    /// Issues a container click with the named `ContainerInput` action — sends
-    /// it to the server and applies it client-side.
-    fn container_click(
+    /// Issues a container click with the named click action (`PICKUP`,
+    /// `QUICK_MOVE`, `SWAP`, …) — sends it to the server and applies it
+    /// client-side.
+    ///
+    /// The API was renamed in 26.1: `handleContainerInput` + `ContainerInput`
+    /// there, `handleInventoryMouseClick` + `ClickType` before. Both are tried,
+    /// with explicit descriptors, so this works on either side of the rename
+    /// whatever version the mapping layer believes it runs.
+    pub fn container_click(
         &self,
         container_id: i32,
         slot: i32,
@@ -39,26 +45,46 @@ impl MultiPlayerGameMode {
         action: &str,
         player: &LocalPlayer,
     ) -> anyhow::Result<()> {
+        const VARIANTS: [(&str, &str); 2] = [
+            ("handleContainerInput", "net/minecraft/world/inventory/ContainerInput"),
+            ("handleInventoryMouseClick", "net/minecraft/world/inventory/ClickType"),
+        ];
         self.in_frame(|| {
-            let input = mapping()
-                .get_static_field(
-                    MinecraftClassType::ContainerInput,
-                    action,
-                    FieldType::Object(MinecraftClassType::ContainerInput),
-                )?
-                .l()?;
-            self.call_method(
-                "handleContainerInput",
-                &[
-                    JValue::Int(container_id),
-                    JValue::Int(slot),
-                    JValue::Int(button),
-                    JValue::Object(&input),
-                    JValue::Object(player.jni_ref().as_obj()),
-                ],
-            )?;
-            Ok(())
+            let mut env = mapping().get_env()?;
+            for (method, class_name) in VARIANTS {
+                let Ok(class) = mapping().resolve_class(&mut env, class_name) else {
+                    continue;
+                };
+                let kind = env
+                    .get_static_field(&class, action, format!("L{class_name};"))
+                    .inspect_err(|_| {
+                        let _ = env.exception_clear();
+                    })?
+                    .l()?;
+                let sig = format!("(IIIL{class_name};Lnet/minecraft/world/entity/player/Player;)V");
+                return crate::mapping::raw::call(
+                    &mut env,
+                    self.jni_ref().as_obj(),
+                    method,
+                    &sig,
+                    &[
+                        JValue::Int(container_id),
+                        JValue::Int(slot),
+                        JValue::Int(button),
+                        JValue::Object(&kind),
+                        JValue::Object(player.jni_ref().as_obj()),
+                    ],
+                )
+                .map(|_| ());
+            }
+            Err(anyhow::anyhow!("no container click API found"))
         })
+    }
+
+    /// PICKUP click with the left button: picks up / places / swaps / merges
+    /// the stack of menu slot `slot` with the carried one.
+    pub fn container_pickup(&self, container_id: i32, slot: i32, player: &LocalPlayer) -> anyhow::Result<()> {
+        self.container_click(container_id, slot, 0, "PICKUP", player)
     }
 
     /// SWAP click: swaps menu slot `slot` of the container `container_id` with

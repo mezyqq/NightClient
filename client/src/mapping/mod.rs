@@ -18,6 +18,7 @@ pub mod block_entity;
 pub mod class;
 pub mod class_type;
 pub mod client;
+pub mod compat;
 pub mod component;
 pub mod entity;
 pub mod inventory;
@@ -26,7 +27,10 @@ mod loader;
 pub mod math;
 mod minecraft_version;
 pub mod object;
+pub mod member_cache;
+pub mod raw;
 mod reflect;
+pub mod registry;
 mod renames;
 
 #[cfg(test)]
@@ -589,7 +593,7 @@ impl Mapping {
         let mut env = self.get_env()?;
 
         let runtime_field = self.runtime_field_name(class_type, field_name)?;
-        match env.get_field(instance, &runtime_field, field_type.get_signature()?) {
+        match member_cache::get_field(&mut env, instance, &runtime_field, &field_type.get_signature()?) {
             Ok(value) => Ok(value),
             Err(_) => {
                 let _ = env.exception_clear();
@@ -614,7 +618,7 @@ impl Mapping {
         let mut env = self.get_env()?;
 
         let runtime_field = self.runtime_field_name(class_type, field_name)?;
-        match env.set_field(instance, &runtime_field, field_type.get_signature()?, value) {
+        match member_cache::set_field(&mut env, instance, &runtime_field, &field_type.get_signature()?, value) {
             Ok(_) => Ok(()),
             Err(_) => {
                 let _ = env.exception_clear();

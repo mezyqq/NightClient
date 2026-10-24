@@ -31,4 +31,10 @@ impl Window {
     pub fn get_window(&self) -> anyhow::Result<jlong> {
         Ok(self.call_method("handle", &[])?.j()?)
     }
+
+    /// The GUI scale factor (`Window.getGuiScale()`) — how many framebuffer
+    /// pixels one vanilla HUD pixel spans.
+    pub fn gui_scale(&self) -> anyhow::Result<f64> {
+        Ok(self.call_method("getGuiScale", &[])?.d()?)
+    }
 }

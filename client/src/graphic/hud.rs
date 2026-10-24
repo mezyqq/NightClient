@@ -17,6 +17,87 @@ pub fn draw(ctx: &Context) {
     let painter = ctx.layer_painter(LayerId::new(Order::Background, Id::new("hud_layer")));
     draw_watermark(ctx, &painter);
     draw_arraylist(ctx, &painter);
+    draw_spectate_bar(ctx, &painter);
+}
+
+/// Spectate's bar just above the hotbar: `◀  name  ▶`, the mode, and the
+/// controls. Shown only while a player is being watched.
+fn draw_spectate_bar(ctx: &Context, painter: &Painter) {
+    use crate::module::player::spectate::{self, Mode};
+    let Some(info) = spectate::hud_info() else {
+        return;
+    };
+
+    let screen = ctx.screen_rect();
+    // The vanilla hotbar plus the health / food rows reach ~40 HUD pixels up
+    // from the bottom; one HUD pixel spans `gui_scale` framebuffer pixels.
+    let hud_px = info.gui_scale / ctx.pixels_per_point();
+    let center = egui::pos2(screen.center().x, screen.bottom() - 52.0 * hud_px);
+
+    let name_font = FontId::proportional(16.0);
+    let name_color = if info.in_range {
+        theme::TEXT
+    } else {
+        theme::TEXT_MUTED
+    };
+    let name_w = ctx.fonts(|f| {
+        f.layout_no_wrap(info.name.clone(), name_font.clone(), name_color)
+            .size()
+            .x
+    });
+
+    let chip = Rect::from_center_size(center, Vec2::new(name_w + 70.0, 28.0));
+    painter.rect_filled(
+        chip,
+        Rounding::same(theme::RADIUS),
+        Color32::from_black_alpha(165),
+    );
+    painter.rect_stroke(
+        chip,
+        Rounding::same(theme::RADIUS),
+        Stroke::new(1.0_f32, theme::BORDER),
+    );
+    painter.text(
+        center,
+        Align2::CENTER_CENTER,
+        &info.name,
+        name_font,
+        name_color,
+    );
+
+    // Arrows either side of the name — W / S step through the players.
+    let arrow = |tip_x: f32, dir: f32| {
+        let s = 6.0;
+        let points = vec![
+            egui::pos2(tip_x, center.y),
+            egui::pos2(tip_x - dir * s * 1.3, center.y - s),
+            egui::pos2(tip_x - dir * s * 1.3, center.y + s),
+        ];
+        painter.add(egui::Shape::convex_polygon(
+            points,
+            theme::ACCENT,
+            Stroke::NONE,
+        ));
+    };
+    arrow(chip.left() + 10.0, -1.0);
+    arrow(chip.right() - 10.0, 1.0);
+
+    let hint = match info.mode {
+        Mode::Orbit => "Auto · W/S player · mouse rotate · wheel zoom · J 3D · Esc exit",
+        Mode::Free => "3D · WASD Space Shift fly · wheel speed · J Auto · Esc exit",
+    };
+    let hint = if info.in_range {
+        hint.to_string()
+    } else {
+        format!("out of range · {hint}")
+    };
+    painter.text(
+        egui::pos2(center.x, chip.bottom() + 4.0),
+        Align2::CENTER_TOP,
+        hint,
+        FontId::proportional(11.5),
+        theme::TEXT_DIM,
+    );
 }
 
 /// Top-left brand badge: `Dark` + accented `Client` inside a rounded chip.

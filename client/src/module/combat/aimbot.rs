@@ -2,7 +2,7 @@ use crate::mapping::entity::mob::Mob;
 use crate::mapping::entity::player::Player;
 use crate::mapping::entity::EntityRef;
 use crate::mapping::MappedObject;
-use crate::module::combat::{look_at, pick_target};
+use crate::module::combat::{is_protected, look_at, pick_target};
 use crate::module::{KeyboardKey, Module, ModuleCategory, ModuleData, ModuleId, ModuleSetting};
 use crate::state::minecraft;
 use std::sync::Mutex;
@@ -97,7 +97,8 @@ impl Module for AimbotModule {
 
         let Some((target_id, target)) =
             pick_target(&entities, eye, range * range, self_id, locked, |entity| {
-                entity.instance_of::<Player>() || entity.instance_of::<Mob>()
+                (entity.instance_of::<Player>() || entity.instance_of::<Mob>())
+                    && !is_protected(entity)
             })
         else {
             *self.target.lock().unwrap() = None;

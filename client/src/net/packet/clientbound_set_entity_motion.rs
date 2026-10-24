@@ -28,15 +28,26 @@ impl ClientboundSetEntityMotionPacket {
         env: &mut JNIEnv,
         packet: &JObject,
     ) -> anyhow::Result<ClientboundSetEntityMotionPacket> {
-        let entity_id = env.call_method(packet, "id", "()I", &[])?.i()?;
-        let movement = env
-            .call_method(packet, "movement", "()Lnet/minecraft/world/phys/Vec3;", &[])?
-            .l()?;
+        // 1.21.5+ is a record (`id()`, `movement()`); before it the packet has
+        // `getId()` and `getXa/Ya/Za()` (already divided by 8000).
+        if let Ok(id) = env.call_method(packet, "id", "()I", &[]) {
+            let entity_id = id.i()?;
+            let movement = env
+                .call_method(packet, "movement", "()Lnet/minecraft/world/phys/Vec3;", &[])?
+                .l()?;
+            return Ok(ClientboundSetEntityMotionPacket {
+                entity_id,
+                x: env.get_field(&movement, "x", "D")?.d()?,
+                y: env.get_field(&movement, "y", "D")?.d()?,
+                z: env.get_field(&movement, "z", "D")?.d()?,
+            });
+        }
+        env.exception_clear()?;
         Ok(ClientboundSetEntityMotionPacket {
-            entity_id,
-            x: env.get_field(&movement, "x", "D")?.d()?,
-            y: env.get_field(&movement, "y", "D")?.d()?,
-            z: env.get_field(&movement, "z", "D")?.d()?,
+            entity_id: env.call_method(packet, "getId", "()I", &[])?.i()?,
+            x: env.call_method(packet, "getXa", "()D", &[])?.d()?,
+            y: env.call_method(packet, "getYa", "()D", &[])?.d()?,
+            z: env.call_method(packet, "getZa", "()D", &[])?.d()?,
         })
     }
 

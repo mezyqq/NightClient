@@ -62,6 +62,7 @@ pub enum MinecraftClassType {
     ServerboundMovePlayerPacketStatusOnly,
     ClientboundSetEntityMotionPacket,
     ClientboundPlayerInfoUpdatePacket,
+    ServerboundPlayerCommandPacket,
 }
 
 impl MinecraftClassType {
@@ -158,6 +159,9 @@ impl MinecraftClassType {
             }
             MinecraftClassType::ClientboundPlayerInfoUpdatePacket => {
                 "net/minecraft/network/protocol/game/ClientboundPlayerInfoUpdatePacket"
+            }
+            MinecraftClassType::ServerboundPlayerCommandPacket => {
+                "net/minecraft/network/protocol/game/ServerboundPlayerCommandPacket"
             }
         }
     }

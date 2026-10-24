@@ -21,6 +21,13 @@ pub enum Command {
         /// file is read from and written to.
         config_dir: PathBuf,
     },
+    /// Ask the running client to write its current state to its config file
+    /// right now. The agent answers with one `ok` / `err …` line.
+    SaveConfig,
+    /// Ask the running client to re-read its config file and apply it live —
+    /// settings, keybinds, layout, and enabling/disabling modules. The agent
+    /// answers with one `ok` / `err …` line.
+    LoadConfig,
 }
 
 /// Failure to parse a command off the wire.
@@ -45,6 +52,8 @@ impl Command {
                 library,
                 config_dir,
             } => format!("reload {}\t{}", library.display(), config_dir.display()),
+            Command::SaveConfig => "save-config".to_string(),
+            Command::LoadConfig => "load-config".to_string(),
         }
     }
 
@@ -79,6 +88,8 @@ impl Command {
                     config_dir,
                 })
             }
+            "save-config" => Ok(Command::SaveConfig),
+            "load-config" => Ok(Command::LoadConfig),
             other => Err(ProtocolError::UnknownVerb(other.to_string())),
         }
     }
@@ -129,6 +140,13 @@ mod tests {
                 config_dir: PathBuf::new(),
             }),
         );
+    }
+
+    #[test]
+    fn config_commands_round_trip() {
+        for command in [Command::SaveConfig, Command::LoadConfig] {
+            assert_eq!(Command::decode(&command.encode()), Ok(command));
+        }
     }
 
     #[test]

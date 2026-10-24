@@ -1,4 +1,5 @@
 use crate::mapping::block_entity::BlockEntity;
+use crate::mapping::entity::player::Player;
 use crate::mapping::entity::Entity;
 use crate::mapping::java::iterable::Iterable;
 use crate::mapping::math::BlockPos;
@@ -30,6 +31,21 @@ impl World {
                 entities.push(Entity::new(iterator.next()?));
             }
             Ok(entities)
+        })
+    }
+
+    /// Every player entity the client currently tracks (`ClientLevel.players()`)
+    /// — the local player included.
+    pub fn players(&self) -> anyhow::Result<Vec<Player>> {
+        self.in_frame(|| {
+            let list = self.call_method("players", &[])?.l()?;
+            let iterable = Iterable::new(mapping().new_global_ref(list)?);
+            let iterator = iterable.iterator()?;
+            let mut players = Vec::new();
+            while iterator.has_next()? {
+                players.push(Player::new(iterator.next()?));
+            }
+            Ok(players)
         })
     }
 

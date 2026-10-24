@@ -7,7 +7,7 @@ use crate::mapping::client::world::World;
 use crate::mapping::entity::player::LocalPlayer;
 use crate::mapping::{FieldType, MappedObject, MinecraftClassType};
 use crate::state::mapping;
-use jni::objects::GlobalRef;
+use jni::objects::{GlobalRef, JObject, JValue};
 use std::sync::RwLock;
 
 /// The running Minecraft client.
@@ -122,6 +122,165 @@ impl Minecraft {
         })
     }
 
+    /// Sends `message` as if typed into chat (`ClientPacketListener.sendChat`).
+    /// Mods hooking chat — Baritone's `#` commands — see it first.
+    pub fn send_chat(&self, message: &str) -> anyhow::Result<()> {
+        self.in_frame(|| {
+            let mut env = mapping().get_env()?;
+            let Some(listener) = self.packet_listener(&mut env)? else {
+                anyhow::bail!("not connected to a world");
+            };
+            let text: JObject = env.new_string(message)?.into();
+            env.call_method(
+                &listener,
+                "sendChat",
+                "(Ljava/lang/String;)V",
+                &[JValue::Object(&text)],
+            )
+            .map_err(|_| clear_exception("sendChat"))?;
+            Ok(())
+        })
+    }
+
+    /// Names of every player on the server's tab list — including players
+    /// far outside entity-tracking range. Empty when not connected.
+    pub fn online_player_names(&self) -> anyhow::Result<Vec<String>> {
+        self.in_frame(|| {
+            let mut env = mapping().get_env()?;
+            let Some(listener) = self.packet_listener(&mut env)? else {
+                return Ok(Vec::new());
+            };
+            let players = env
+                .call_method(
+                    &listener,
+                    "getOnlinePlayers",
+                    "()Ljava/util/Collection;",
+                    &[],
+                )
+                .map_err(|_| clear_exception("getOnlinePlayers"))?
+                .l()?;
+            let iterator = env
+                .call_method(&players, "iterator", "()Ljava/util/Iterator;", &[])?
+                .l()?;
+            let mut names = Vec::new();
+            while env.call_method(&iterator, "hasNext", "()Z", &[])?.z()? {
+                let name = env.with_local_frame(4, |env| -> anyhow::Result<String> {
+                    let info = env
+                        .call_method(&iterator, "next", "()Ljava/lang/Object;", &[])?
+                        .l()?;
+                    let profile = env
+                        .call_method(
+                            &info,
+                            "getProfile",
+                            "()Lcom/mojang/authlib/GameProfile;",
+                            &[],
+                        )?
+                        .l()?;
+                    let name = env
+                        .call_method(&profile, "getName", "()Ljava/lang/String;", &[])?
+                        .l()?;
+                    mapping().get_string(name)
+                });
+                match name {
+                    Ok(name) => names.push(name),
+                    Err(_) => {
+                        let _ = env.exception_clear();
+                    }
+                }
+            }
+            names.sort_by_key(|name| name.to_lowercase());
+            Ok(names)
+        })
+    }
+
+    /// The current perspective (`Options.getCameraType`) — a `CameraType`.
+    pub fn camera_type(&self) -> anyhow::Result<GlobalRef> {
+        self.in_frame(|| {
+            let mut env = mapping().get_env()?;
+            let options = self.options()?;
+            let kind = env
+                .call_method(
+                    options.jni_ref().as_obj(),
+                    "getCameraType",
+                    "()Lnet/minecraft/client/CameraType;",
+                    &[],
+                )
+                .map_err(|_| clear_exception("getCameraType"))?
+                .l()?;
+            Ok(env.new_global_ref(kind)?)
+        })
+    }
+
+    /// Sets the perspective to `kind`, a `CameraType` from [`camera_type`] or
+    /// [`third_person_camera`].
+    pub fn set_camera_type(&self, kind: &GlobalRef) -> anyhow::Result<()> {
+        self.in_frame(|| {
+            let mut env = mapping().get_env()?;
+            let options = self.options()?;
+            env.call_method(
+                options.jni_ref().as_obj(),
+                "setCameraType",
+                "(Lnet/minecraft/client/CameraType;)V",
+                &[JValue::Object(kind.as_obj())],
+            )
+            .map_err(|_| clear_exception("setCameraType"))?;
+            Ok(())
+        })
+    }
+
+    /// `CameraType.THIRD_PERSON_BACK`, or `THIRD_PERSON_FRONT` when `front`.
+    pub fn third_person_camera(&self, front: bool) -> anyhow::Result<GlobalRef> {
+        let name = if front { "THIRD_PERSON_FRONT" } else { "THIRD_PERSON_BACK" };
+        self.in_frame(|| {
+            let mut env = mapping().get_env()?;
+            let class = mapping().resolve_class(&mut env, "net/minecraft/client/CameraType")?;
+            let kind = env
+                .get_static_field(
+                    class,
+                    name,
+                    "Lnet/minecraft/client/CameraType;",
+                )
+                .map_err(|_| clear_exception(name))?
+                .l()?;
+            Ok(env.new_global_ref(kind)?)
+        })
+    }
+
+    /// Re-syncs every key binding with the physical keyboard: releases them
+    /// all (`KeyMapping.releaseAll`), then marks held keyboard keys down again
+    /// (`KeyMapping.setAll`). Used after input was withheld from the game, so
+    /// no binding stays stuck "down" on a key released in the meantime.
+    pub fn resync_key_mappings(&self) -> anyhow::Result<()> {
+        self.in_frame(|| {
+            let mut env = mapping().get_env()?;
+            let class = mapping().resolve_class(&mut env, "net/minecraft/client/KeyMapping")?;
+            env.call_static_method(&class, "releaseAll", "()V", &[])
+                .map_err(|_| clear_exception("KeyMapping.releaseAll"))?;
+            env.call_static_method(&class, "setAll", "()V", &[])
+                .map_err(|_| clear_exception("KeyMapping.setAll"))?;
+            Ok(())
+        })
+    }
+
+    /// The local player's `ClientPacketListener`, or `None` when not in a world.
+    fn packet_listener<'a>(
+        &self,
+        env: &mut jni::JNIEnv<'a>,
+    ) -> anyhow::Result<Option<JObject<'a>>> {
+        let Some(player) = self.player()? else {
+            return Ok(None);
+        };
+        let listener = env
+            .get_field(
+                player.jni_ref().as_obj(),
+                "connection",
+                "Lnet/minecraft/client/multiplayer/ClientPacketListener;",
+            )
+            .map_err(|_| clear_exception("LocalPlayer.connection"))?
+            .l()?;
+        Ok((!listener.is_null()).then_some(listener))
+    }
+
     /// Whether a world is currently loaded.
     pub fn in_world(&self) -> bool {
         matches!(self.player(), Ok(Some(_)))
@@ -190,4 +349,12 @@ impl Minecraft {
             Ok(Some(mapping().new_global_ref(obj)?))
         })
     }
+}
+
+/// Clears the pending Java exception after a failed JNI call and describes it.
+fn clear_exception(what: &str) -> anyhow::Error {
+    if let Ok(env) = mapping().get_env() {
+        let _ = env.exception_clear();
+    }
+    anyhow::anyhow!("JNI call {what} failed")
 }

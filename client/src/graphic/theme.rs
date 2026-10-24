@@ -61,7 +61,9 @@ pub fn apply(ctx: &Context) {
     v.popup_shadow = v.window_shadow;
 
     v.selection.bg_fill = ACCENT;
-    v.selection.stroke = Stroke::NONE;
+    // Also the text colour of selected items (tabs, list rows): dark on the
+    // accent fill — `NONE` would make that text invisible.
+    v.selection.stroke = Stroke::new(1.0_f32, Color32::BLACK);
     v.hyperlink_color = ACCENT;
 
     let w = &mut v.widgets;

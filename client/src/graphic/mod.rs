@@ -1,4 +1,5 @@
 pub mod anim;
+pub mod autosort_window;
 pub mod esp;
 pub mod gui;
 pub mod hook;
@@ -9,3 +10,6 @@ pub mod notification;
 pub mod platform;
 pub mod theme;
 pub mod ui_engine;
+pub mod windows;
+pub mod workspace;
+pub mod frame_matrices;

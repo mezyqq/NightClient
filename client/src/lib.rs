@@ -24,15 +24,40 @@ use crate::module::combat::killaura::KillAuraModule;
 use crate::module::combat::mobaura::MobAuraModule;
 use crate::module::combat::velocity::VelocityModule;
 use crate::module::misc::antiafk::AntiAfkModule;
+use crate::module::misc::baritone::BaritoneModule;
+use crate::module::misc::tptodeath::TpToDeathModule;
 use crate::module::movement::fly::FlyModule;
 use crate::module::movement::nofall::NoFallModule;
 use crate::module::movement::noslowdown::NoSlowdownModule;
 use crate::module::movement::speed::SpeedModule;
 use crate::module::movement::sprint::SprintModule;
+use crate::module::player::antihunger::AntiHungerModule;
 use crate::module::player::autoarmor::AutoArmorModule;
 use crate::module::player::autototem::AutoTotemModule;
 use crate::module::player::cheststealer::ChestStealerModule;
 use crate::module::player::freecam::FreecamModule;
+use crate::module::player::autoeat::AutoEatModule;
+use crate::module::player::autotool::AutoToolModule;
+use crate::module::player::fastplace::FastPlaceModule;
+use crate::module::player::godmode::GodModeModule;
+use crate::module::player::session::{AutoCommandModule, AutoReconnectModule, AutoRespawnModule};
+use crate::module::render::trajectories::TrajectoriesModule;
+use crate::module::combat::antibot::AntiBotModule;
+use crate::module::combat::triggerbot::TriggerBotModule;
+use crate::module::misc::friends::FriendsModule;
+use crate::module::misc::macros::MacrosModule;
+use crate::module::optimization::{
+    background::BackgroundFpsModule, clean_view::CleanViewModule, entity_culler::EntityCullerModule,
+    fps_boost::FpsBoostModule, no_render::NoRenderModule, particles::ParticlesModule,
+    ram_cleaner::RamCleanerModule,
+};
+use crate::module::render::ambience::AmbienceModule;
+use crate::module::render::freelook::FreelookModule;
+use crate::module::world::autosort::AutoSortModule;
+use crate::module::world::farmhelper::FarmHelperModule;
+use crate::module::world::throughsigns::ThroughSignsModule;
+use crate::module::player::spectate::SpectateModule;
+use crate::module::render::block_esp::BlockEspModule;
 use crate::module::render::chest_esp::ChestEspModule;
 use crate::module::render::fullbright::FullbrightModule;
 use crate::module::render::mob_esp::MobEspModule;
@@ -40,6 +65,16 @@ use crate::module::render::nametags::NametagsModule;
 use crate::module::render::player_esp::PlayerEspModule;
 use crate::module::render::tracers::TracersModule;
 use crate::module::world::nuker::NukerModule;
+use crate::module::world::airplace::AirPlaceModule;
+use crate::module::render::spin::SpinModule;
+use crate::module::movement::step::StepModule;
+use crate::module::movement::safewalk::SafeWalkModule;
+use crate::module::movement::elytrafly::ElytraFlyModule;
+use crate::module::player::autofish::AutoFishModule;
+use crate::module::render::crosshair::CrosshairModule;
+use crate::module::render::hit_effects::{DamageNumbersModule, HitMarkerModule};
+use crate::module::render::item_esp::ItemEspModule;
+use crate::module::render::target_hud::TargetHudModule;
 use crate::module::world::scaffold::ScaffoldModule;
 use crate::state::{client, init};
 use log::{error, info, LevelFilter};
@@ -115,11 +150,32 @@ pub extern "C" fn cleanup_client() {
     // `init` had a chance to succeed.
     if let Some(client) = crate::state::try_client() {
         client.modules.set_active(false);
+        // Put back forced options, particle providers, event listeners.
+        crate::module::optimization::cleanup();
+        crate::module::render::spin::cleanup();
+        crate::graphic::frame_matrices::cleanup();
+        crate::module::render::crosshair::cleanup();
     }
     // Hooks are gone and `RUNNING` is clear, so nothing else touches the
     // global state — release the JVM references it holds before unload.
     crate::state::teardown();
     info!("Client cleanup completed");
+}
+
+/// Writes the client's current state to its config file now. Called by the
+/// agent loader on a `save-config` command (the darkC profile manager).
+#[no_mangle]
+pub extern "C" fn save_config() -> bool {
+    RUNNING.load(Ordering::SeqCst) && crate::state::try_client().is_some() && config::save()
+}
+
+/// Re-reads the config file and applies it live. Called by the agent loader on
+/// a `load-config` command (the darkC profile manager).
+#[no_mangle]
+pub extern "C" fn load_config() -> bool {
+    RUNNING.load(Ordering::SeqCst)
+        && crate::state::try_client().is_some()
+        && config::request_live_load()
 }
 
 /// Registers the built-in modules with the client.
@@ -148,4 +204,44 @@ fn register_modules() {
     modules.register(NukerModule::new());
     modules.register(ScaffoldModule::new());
     modules.register(FreecamModule::new());
+    modules.register(SpectateModule::new());
+    modules.register(BaritoneModule::new());
+    modules.register(BlockEspModule::new());
+    modules.register(GodModeModule::new());
+    modules.register(TpToDeathModule::new());
+    modules.register(AutoEatModule::new());
+    modules.register(AutoToolModule::new());
+    modules.register(AutoRespawnModule::new());
+    modules.register(AutoReconnectModule::new());
+    modules.register(FastPlaceModule::new());
+    modules.register(AutoCommandModule::new());
+    modules.register(TrajectoriesModule::new());
+    modules.register(FriendsModule::new());
+    modules.register(AntiBotModule::new());
+    modules.register(TriggerBotModule::new());
+    modules.register(AutoSortModule::new());
+    modules.register(AmbienceModule::new());
+    modules.register(FreelookModule::new());
+    modules.register(FarmHelperModule::new());
+    modules.register(ThroughSignsModule::new());
+    modules.register(MacrosModule::new());
+    modules.register(FpsBoostModule::new());
+    modules.register(CleanViewModule::new());
+    modules.register(ParticlesModule::new());
+    modules.register(NoRenderModule::new());
+    modules.register(EntityCullerModule::new());
+    modules.register(BackgroundFpsModule::new());
+    modules.register(RamCleanerModule::new());
+    modules.register(AntiHungerModule::new());
+    modules.register(AirPlaceModule::new());
+    modules.register(SpinModule::new());
+    modules.register(StepModule::new());
+    modules.register(SafeWalkModule::new());
+    modules.register(ElytraFlyModule::new());
+    modules.register(AutoFishModule::new());
+    modules.register(ItemEspModule::new());
+    modules.register(TargetHudModule::new());
+    modules.register(HitMarkerModule::new());
+    modules.register(DamageNumbersModule::new());
+    modules.register(CrosshairModule::new());
 }

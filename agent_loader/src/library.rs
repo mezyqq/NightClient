@@ -81,6 +81,23 @@ fn load(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Calls an exported `extern "C" fn() -> bool` on the loaded client — a
+/// request the client reports success for. Fails when no client is loaded,
+/// the symbol is missing (an older client), or the client returns `false`.
+pub fn call_status(symbol: &[u8]) -> Result<()> {
+    let slot = lock();
+    let library = slot.as_ref().ok_or("клиент не загружен — сначала инжект")?;
+    let name = String::from_utf8_lossy(symbol).into_owned();
+    // SAFETY: the client exports these symbols as `extern "C" fn() -> bool`.
+    let func = unsafe { library.get::<Symbol<extern "C" fn() -> bool>>(symbol) }
+        .map_err(|_| format!("{name} не экспортирован — переинжектите клиент"))?;
+    if func() {
+        Ok(())
+    } else {
+        Err(format!("{name} не выполнен — подробности в dark_client.log").into())
+    }
+}
+
 /// Calls an exported `extern "C" fn()` by name, if the library exports it.
 ///
 /// # Safety

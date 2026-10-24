@@ -11,8 +11,23 @@ use ilhook::x64::{CallbackOption, HookFlags, HookPoint, HookType, Hooker, Regist
 use log::info;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 static LAST_TICK: AtomicI32 = AtomicI32::new(0);
+/// Game ticks seen since injection (in a world with a living player).
+static GAME_TICKS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// When the frame hook first saw the latest tick.
+static TICK_SEEN_AT: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Game ticks seen so far, and how long ago the latest one was seen — the
+/// clock macros are timed on.
+pub fn game_clock() -> (u64, std::time::Duration) {
+    let seen = TICK_SEEN_AT.lock().unwrap_or_else(|p| p.into_inner());
+    (
+        GAME_TICKS.load(Ordering::Relaxed),
+        seen.map(|at| at.elapsed()).unwrap_or_default(),
+    )
+}
 static GL_LOADED: AtomicBool = AtomicBool::new(false);
 
 /// Wrapper that lets an `ilhook` handle cross thread boundaries. Dropping the
@@ -37,6 +52,25 @@ unsafe extern "win64" fn swap_buffers_hook(_registers: *mut Registers, _user_dat
     on_frame();
 }
 
+/// Set while [`on_frame`] runs; only the render thread swaps buffers.
+static IN_FRAME: AtomicBool = AtomicBool::new(false);
+
+/// Marks [`on_frame`] as running until dropped.
+struct FrameGuard;
+
+impl FrameGuard {
+    /// `None` if a frame pass is already running (a nested swap).
+    fn enter() -> Option<FrameGuard> {
+        (!IN_FRAME.swap(true, Ordering::Acquire)).then_some(FrameGuard)
+    }
+}
+
+impl Drop for FrameGuard {
+    fn drop(&mut self) {
+        IN_FRAME.store(false, Ordering::Release);
+    }
+}
+
 /// Runs once per graphical frame, from the buffer-swap hook.
 unsafe fn on_frame() {
     // If `cleanup_client()` has run, `RUNNING` is false — bail immediately:
@@ -44,6 +78,13 @@ unsafe fn on_frame() {
     if !RUNNING.load(Ordering::SeqCst) {
         return;
     }
+    // A game call made from inside this hook can render frames of its own
+    // (`ConnectScreen.startConnecting` → `Minecraft.disconnect` runs a nested
+    // render loop) and so re-enter it. The outer pass holds module and
+    // session locks, so a nested pass would deadlock on them — skip it.
+    let Some(_reentry) = FrameGuard::enter() else {
+        return;
+    };
 
     // Resolve the GL function pointers once, on the live render context.
     if !GL_LOADED.load(Ordering::Relaxed) {
@@ -51,12 +92,80 @@ unsafe fn on_frame() {
         GL_LOADED.store(true, Ordering::Relaxed);
     }
 
+    let started = Instant::now();
     check_tick();
+    let ticked = Instant::now();
+    // Death screen, disconnect screen and joins — handled even while the
+    // registry is inactive.
+    crate::module::player::session::frame();
+    // Apply a config profile switched from darkC, on this (the game) thread.
+    crate::config::process_pending();
     // Ease combat-module rotations toward their target every frame — this is
     // what makes aiming smooth rather than the visible 20 Hz tick steps.
     crate::module::combat::rotation::update();
+    // Place the spectate camera for the next frame.
+    crate::module::player::spectate::update();
+    crate::module::render::freelook::update();
+    crate::module::render::ambience::frame();
+    crate::module::misc::macros::frame();
+    crate::module::optimization::frame();
+    crate::module::render::spin::frame();
+    crate::module::world::farmhelper::frame();
+    let updated = Instant::now();
     render_overlay();
+    FRAME_COST.lock().unwrap_or_else(|p| p.into_inner()).record(started, ticked, updated);
 }
+
+/// Wall-time DarkClient spends inside each frame, logged every
+/// [`FrameCost::REPORT_EVERY`] — the way to tell whether the client, or
+/// something else, is costing frame rate.
+struct FrameCost {
+    since: Option<Instant>,
+    frames: u32,
+    tick: Duration,
+    update: Duration,
+    overlay: Duration,
+    worst: Duration,
+}
+
+impl FrameCost {
+    const REPORT_EVERY: Duration = Duration::from_secs(10);
+
+    fn record(&mut self, started: Instant, ticked: Instant, updated: Instant) {
+        let now = Instant::now();
+        let since = *self.since.get_or_insert(started);
+        self.frames += 1;
+        self.tick += ticked - started;
+        self.update += updated - ticked;
+        self.overlay += now - updated;
+        self.worst = self.worst.max(now - started);
+
+        if now - since >= Self::REPORT_EVERY {
+            let per_frame = |total: Duration| total.as_secs_f64() * 1000.0 / self.frames as f64;
+            info!(
+                "frame cost: {:.0} fps, client {:.2} ms/frame (tick {:.2}, update {:.2}, overlay {:.2}), worst {:.1} ms",
+                self.frames as f64 / (now - since).as_secs_f64(),
+                per_frame(self.tick + self.update + self.overlay),
+                per_frame(self.tick),
+                per_frame(self.update),
+                per_frame(self.overlay),
+                self.worst.as_secs_f64() * 1000.0,
+            );
+            *self = FrameCost::EMPTY;
+        }
+    }
+
+    const EMPTY: FrameCost = FrameCost {
+        since: None,
+        frames: 0,
+        tick: Duration::ZERO,
+        update: Duration::ZERO,
+        overlay: Duration::ZERO,
+        worst: Duration::ZERO,
+    };
+}
+
+static FRAME_COST: Mutex<FrameCost> = Mutex::new(FrameCost::EMPTY);
 
 /// Renders the egui overlay for the current frame.
 unsafe fn render_overlay() {
@@ -102,8 +211,17 @@ fn check_tick() {
         Err(_) => return,
     };
 
-    if tick_count > LAST_TICK.load(Ordering::Relaxed) {
-        LAST_TICK.store(tick_count, Ordering::Relaxed);
+    // Any change counts as a new tick — not just an increase: a respawn, a
+    // dimension change or a rejoin creates a fresh player whose counter
+    // restarts at 0, and waiting for it to pass the old value would freeze
+    // every module (and the packet handler upkeep) until a re-inject.
+    let previous = LAST_TICK.swap(tick_count, Ordering::Relaxed);
+    if previous != tick_count {
+        // Below 20 FPS several ticks run per frame; a reset counter (respawn,
+        // dimension change) counts as one.
+        let advanced = if tick_count > previous { (tick_count - previous) as u64 } else { 1 };
+        GAME_TICKS.fetch_add(advanced, Ordering::Relaxed);
+        *TICK_SEEN_AT.lock().unwrap_or_else(|p| p.into_inner()) = Some(Instant::now());
         // Keep our Netty handler on the live connection's pipeline.
         crate::net::ensure_installed();
         state::client().modules.tick();

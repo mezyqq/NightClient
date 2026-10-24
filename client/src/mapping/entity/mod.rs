@@ -176,9 +176,15 @@ pub trait EntityRef: MappedObject + Sized {
         Ok(())
     }
 
-    /// The accumulated fall distance.
+    /// The accumulated fall distance. A `float` up to 1.21.4, a `double`
+    /// since 1.21.5 — read directly with both descriptors.
     fn get_fall_distance(&self) -> anyhow::Result<f64> {
-        Ok(self.get_field("fallDistance", FieldType::Double)?.d()?)
+        let mut env = mapping().get_env()?;
+        let obj = self.jni_ref().as_obj();
+        if let Ok(value) = crate::mapping::raw::field(&mut env, obj, "fallDistance", "F") {
+            return Ok(value.f()? as f64);
+        }
+        Ok(crate::mapping::raw::field(&mut env, obj, "fallDistance", "D")?.d()?)
     }
 
     /// Resets the accumulated fall distance to zero.

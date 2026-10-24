@@ -15,6 +15,7 @@
 pub mod clientbound_player_info_update;
 pub mod clientbound_set_entity_motion;
 pub mod serverbound_move_player;
+pub mod serverbound_player_command;
 
 use crate::mapping::MinecraftClassType;
 use crate::state::mapping;
@@ -24,6 +25,7 @@ use jni::objects::JObject;
 use jni::sys::jobject;
 use jni::JNIEnv;
 use serverbound_move_player::ServerboundMovePlayerPacket;
+use serverbound_player_command::ServerboundPlayerCommandPacket;
 
 /// A packet passing through the connection, in a form modules can `match` on.
 /// Variant names mirror the Minecraft packet classes.
@@ -36,6 +38,8 @@ pub enum Packet {
     /// Inbound `ClientboundPlayerInfoUpdatePacket` — held by reference so a
     /// module (Freecam) can queue and replay it unchanged.
     ClientboundPlayerInfoUpdate(ClientboundPlayerInfoUpdatePacket),
+    /// Outbound `ServerboundPlayerCommandPacket` — read-only, may be cancelled.
+    ServerboundPlayerCommand(ServerboundPlayerCommandPacket),
 }
 
 /// What should happen to a packet after the modules have seen it. Returned by
@@ -57,6 +61,11 @@ impl Packet {
         if is_instance(env, packet, serverbound_move_player::CLASS_TYPE)? {
             return Ok(Some(Packet::ServerboundMovePlayer(
                 ServerboundMovePlayerPacket::read(env, packet)?,
+            )));
+        }
+        if is_instance(env, packet, serverbound_player_command::CLASS_TYPE)? {
+            return Ok(Some(Packet::ServerboundPlayerCommand(
+                ServerboundPlayerCommandPacket::read(env, packet)?,
             )));
         }
         Ok(None)
@@ -88,6 +97,9 @@ impl Packet {
             // Pass-through: never mutated, so dispatch never asks to rebuild.
             // Return the original ref's raw handle for completeness.
             Packet::ClientboundPlayerInfoUpdate(packet) => {
+                Ok(env.new_local_ref(packet.jni_ref.as_obj())?.into_raw())
+            }
+            Packet::ServerboundPlayerCommand(packet) => {
                 Ok(env.new_local_ref(packet.jni_ref.as_obj())?.into_raw())
             }
         }

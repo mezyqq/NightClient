@@ -3,6 +3,7 @@ use std::fmt::Debug;
 pub mod combat;
 pub mod misc;
 pub mod movement;
+pub mod optimization;
 pub mod player;
 pub mod registry;
 pub mod render;
@@ -19,6 +20,7 @@ pub enum ModuleCategory {
     Player,
     World,
     Misc,
+    Optimization,
 }
 
 impl ModuleCategory {
@@ -31,6 +33,7 @@ impl ModuleCategory {
             ModuleCategory::Player => "Player",
             ModuleCategory::World => "World",
             ModuleCategory::Misc => "Misc",
+            ModuleCategory::Optimization => "Optimization",
         }
     }
 }
@@ -61,6 +64,46 @@ pub enum ModuleId {
     Nuker,
     Scaffold,
     Freecam,
+    Spectate,
+    Baritone,
+    BlockEsp,
+    GodMode,
+    TpToDeath,
+    AutoEat,
+    AutoTool,
+    AutoRespawn,
+    AutoReconnect,
+    FastPlace,
+    AutoCommand,
+    Trajectories,
+    Friends,
+    AntiBot,
+    TriggerBot,
+    AutoSort,
+    Ambience,
+    Freelook,
+    FarmHelper,
+    ThroughSigns,
+    Macros,
+    FpsBoost,
+    CleanView,
+    Particles,
+    NoRender,
+    EntityCuller,
+    BackgroundFps,
+    RamCleaner,
+    AntiHunger,
+    AirPlace,
+    Spin,
+    Step,
+    SafeWalk,
+    ElytraFly,
+    AutoFish,
+    ItemEsp,
+    TargetHud,
+    HitMarker,
+    DamageNumbers,
+    Crosshair,
 }
 
 impl ModuleId {
@@ -90,6 +133,46 @@ impl ModuleId {
             ModuleId::Nuker => "Nuker",
             ModuleId::Scaffold => "Scaffold",
             ModuleId::Freecam => "Freecam",
+            ModuleId::Spectate => "Spectate",
+            ModuleId::Baritone => "Baritone",
+            ModuleId::BlockEsp => "Block ESP",
+            ModuleId::GodMode => "God Mode",
+            ModuleId::TpToDeath => "TP to Death",
+            ModuleId::AutoEat => "AutoEat",
+            ModuleId::AutoTool => "AutoTool",
+            ModuleId::AutoRespawn => "AutoRespawn",
+            ModuleId::AutoReconnect => "AutoReconnect",
+            ModuleId::FastPlace => "FastPlace",
+            ModuleId::AutoCommand => "AutoCommand",
+            ModuleId::Trajectories => "Trajectories",
+            ModuleId::Friends => "Friends",
+            ModuleId::AntiBot => "AntiBot",
+            ModuleId::TriggerBot => "TriggerBot",
+            ModuleId::AutoSort => "AutoSort",
+            ModuleId::Ambience => "Ambience",
+            ModuleId::Freelook => "Freelook",
+            ModuleId::FarmHelper => "FarmHelper",
+            ModuleId::ThroughSigns => "Open Through",
+            ModuleId::Macros => "Macros",
+            ModuleId::FpsBoost => "FPS Boost",
+            ModuleId::CleanView => "Clean View",
+            ModuleId::Particles => "Particles",
+            ModuleId::NoRender => "NoRender",
+            ModuleId::EntityCuller => "Entity Culler",
+            ModuleId::BackgroundFps => "Background FPS",
+            ModuleId::RamCleaner => "RAM Cleaner",
+            ModuleId::AntiHunger => "AntiHunger",
+            ModuleId::AirPlace => "AirPlace",
+            ModuleId::Spin => "Spin",
+            ModuleId::Step => "Step",
+            ModuleId::SafeWalk => "SafeWalk",
+            ModuleId::ElytraFly => "ElytraFly",
+            ModuleId::AutoFish => "AutoFish",
+            ModuleId::ItemEsp => "ItemESP",
+            ModuleId::TargetHud => "TargetHUD",
+            ModuleId::HitMarker => "HitMarker",
+            ModuleId::DamageNumbers => "DamageNumbers",
+            ModuleId::Crosshair => "Crosshair",
         }
     }
 }
@@ -206,6 +289,10 @@ pub trait Module: Debug + Send + Sync {
     fn get_module_data_mut(&mut self) -> &mut ModuleData;
 }
 
+/// Bind code of GLFW mouse button 0 — mouse buttons are bound as
+/// `MOUSE_BUTTON_BASE + button`.
+pub const MOUSE_BUTTON_BASE: i32 = 1000;
+
 // lwjgl key mapping
 #[repr(i32)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -318,6 +405,14 @@ pub enum KeyboardKey {
     KeyNext = 267,
     KeyInsert = 260,
     KeyDelete = 261,
+    // Mouse buttons, as `MOUSE_BUTTON_BASE + GLFW button` — kept clear of the
+    // GLFW key range. Left / right are not bindable (every click would toggle).
+    MouseMiddle = 1002,
+    Mouse4 = 1003,
+    Mouse5 = 1004,
+    Mouse6 = 1005,
+    Mouse7 = 1006,
+    Mouse8 = 1007,
 }
 
 impl KeyboardKey {
@@ -430,6 +525,12 @@ impl KeyboardKey {
             267 => KeyboardKey::KeyNext,
             260 => KeyboardKey::KeyInsert,
             261 => KeyboardKey::KeyDelete,
+            1002 => KeyboardKey::MouseMiddle,
+            1003 => KeyboardKey::Mouse4,
+            1004 => KeyboardKey::Mouse5,
+            1005 => KeyboardKey::Mouse6,
+            1006 => KeyboardKey::Mouse7,
+            1007 => KeyboardKey::Mouse8,
             _ => KeyboardKey::KeyNone,
         }
     }
@@ -545,6 +646,12 @@ impl std::fmt::Display for KeyboardKey {
             KeyboardKey::KeyNext => str::to_string("Next"),
             KeyboardKey::KeyInsert => str::to_string("Insert"),
             KeyboardKey::KeyDelete => str::to_string("Delete"),
+            KeyboardKey::MouseMiddle => str::to_string("Mouse 3"),
+            KeyboardKey::Mouse4 => str::to_string("Mouse 4"),
+            KeyboardKey::Mouse5 => str::to_string("Mouse 5"),
+            KeyboardKey::Mouse6 => str::to_string("Mouse 6"),
+            KeyboardKey::Mouse7 => str::to_string("Mouse 7"),
+            KeyboardKey::Mouse8 => str::to_string("Mouse 8"),
         };
         f.write_str(&name)
     }
