@@ -111,7 +111,7 @@ fn try_open() -> anyhow::Result<bool> {
         y as f64 + 0.5 + dy as f64 * 0.5,
         z as f64 + 0.5 + dz as f64 * 0.5,
     );
-    game_mode.place_block_on(&player, &BlockPos::new(x, y, z), face, hit)?;
+    game_mode.place_block_on(&player, "MAIN_HAND", &BlockPos::new(x, y, z), face, hit)?;
     player.swing()?;
     Ok(true)
 }

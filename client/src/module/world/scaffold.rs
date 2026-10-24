@@ -1,15 +1,19 @@
 use crate::mapping::block::Direction;
 use crate::mapping::entity::EntityRef;
 use crate::mapping::math::{BlockPos, Vec3};
-use crate::module::{KeyboardKey, Module, ModuleCategory, ModuleData, ModuleId};
-use crate::state::minecraft;
+use crate::mapping::entity::player::LocalPlayer;
+use crate::mapping::{raw, MappedObject};
+use crate::module::player::hands;
+use crate::module::{KeyboardKey, Module, ModuleCategory, ModuleData, ModuleId, ModuleSetting};
+use crate::state::{mapping, minecraft};
 
 /// Horizontal speed below which the player counts as standing still.
 const MOVING_THRESHOLD: f64 = 0.01;
 
 /// Bridges automatically: extends a line of blocks ahead of the player in the
 /// direction they are moving, so they can keep walking over a gap. The held
-/// item is what gets placed, so the player should be holding blocks.
+/// item is what gets placed, so the player should be holding blocks — in the
+/// main hand, or in the off hand with "Off hand" on.
 #[derive(Debug)]
 pub struct ScaffoldModule {
     pub module: ModuleData,
@@ -24,7 +28,10 @@ impl ScaffoldModule {
                 category: ModuleCategory::World,
                 key_bind: KeyboardKey::KeyNone,
                 enabled: false,
-                settings: vec![],
+                settings: vec![ModuleSetting::Toggle {
+                    name: "Off hand".to_string(),
+                    value: true,
+                }],
             },
         }
     }
@@ -88,7 +95,17 @@ impl Module for ScaffoldModule {
             // The anchor face pointing back at the target is where the new
             // block attaches.
             let face = direction.opposite();
-            return game_mode.place_block_on(&player, &anchor, face, face_center(anchor, face));
+            let off_hand = self
+                .module
+                .get_setting("Off hand")
+                .and_then(ModuleSetting::get_toggle_value)
+                .unwrap_or(false);
+            let hand = if off_hand && !holds_block(&player, "getMainHandItem")? && holds_block(&player, "getOffhandItem")? {
+                "OFF_HAND"
+            } else {
+                "MAIN_HAND"
+            };
+            return game_mode.place_block_on(&player, hand, &anchor, face, face_center(anchor, face));
         }
         Ok(())
     }
@@ -100,6 +117,18 @@ impl Module for ScaffoldModule {
     fn get_module_data_mut(&mut self) -> &mut ModuleData {
         &mut self.module
     }
+}
+
+/// Whether the stack from `getter` (`getMainHandItem` / `getOffhandItem`) is a
+/// placeable block.
+fn holds_block(player: &LocalPlayer, getter: &str) -> anyhow::Result<bool> {
+    mapping().in_frame(|| {
+        let mut env = mapping().get_env()?;
+        let stack = raw::call(&mut env, player.jni_ref().as_obj(), getter, &format!("(){}", hands::STACK_SIG), &[])?.l()?;
+        let item = raw::call(&mut env, &stack, "getItem", "()Lnet/minecraft/world/item/Item;", &[])?.l()?;
+        let block_item = mapping().resolve_class(&mut env, "net/minecraft/world/item/BlockItem")?;
+        Ok(env.is_instance_of(&item, &block_item)?)
+    })
 }
 
 /// The unit step `(dx, dz)` along the dominant horizontal movement axis, or

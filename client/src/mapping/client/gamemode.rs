@@ -143,12 +143,13 @@ impl MultiPlayerGameMode {
         Ok(())
     }
 
-    /// Uses the player's held item against the `face` face of the block at
-    /// `anchor`, hitting it at world point `hit` — placing a block at
-    /// `anchor + face` when the held item is a block.
+    /// Uses the item in `hand` (`"MAIN_HAND"` / `"OFF_HAND"`) against the
+    /// `face` face of the block at `anchor`, hitting it at world point `hit` —
+    /// placing a block at `anchor + face` when that item is a block.
     pub fn place_block_on(
         &self,
         player: &LocalPlayer,
+        hand: &str,
         anchor: &BlockPos,
         face: Direction,
         hit: Vec3,
@@ -174,7 +175,7 @@ impl MultiPlayerGameMode {
             let hand = mapping()
                 .get_static_field(
                     MinecraftClassType::InteractionHand,
-                    "MAIN_HAND",
+                    hand,
                     FieldType::Object(MinecraftClassType::InteractionHand),
                 )?
                 .l()?;

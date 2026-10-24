@@ -232,7 +232,7 @@ fn replant_all(
             let [x, y, z] = entry.pos;
             let soil = BlockPos::new(x, y - 1, z);
             let hit = Vec3::new(x as f64 + 0.5, y as f64, z as f64 + 0.5);
-            if let Err(error) = game_mode.place_block_on(player, &soil, Direction::Up, hit) {
+            if let Err(error) = game_mode.place_block_on(player, "MAIN_HAND", &soil, Direction::Up, hit) {
                 log::debug!("FarmHelper: replant at {x} {y} {z}: {error}");
             }
         }

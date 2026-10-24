@@ -146,7 +146,7 @@ impl Module for AirPlaceModule {
         let [x, y, z] = target;
         let pos = BlockPos::new(x, y, z);
         let hit = Vec3::new(x as f64 + 0.5, y as f64 + 0.5, z as f64 + 0.5);
-        game_mode.place_block_on(&player, &pos, Direction::Up, hit)?;
+        game_mode.place_block_on(&player, "MAIN_HAND", &pos, Direction::Up, hit)?;
         swing(&player)
     }
 
